@@ -25,18 +25,27 @@
 #include <collection.h> // bring in the CRT iterator for support for C++ CX code
 #endif
 
-#ifdef WIL_ENABLE_EXCEPTIONS
 /// @cond
+#if defined(WIL_ENABLE_EXCEPTIONS) && !defined(__WI_HAS_STD_LESS)
+#ifdef __has_include
+#if __has_include(<functional>)
+#define __WI_HAS_STD_LESS 1
+#include <functional>
+#endif // Otherwise, not using STL; don't specialize std::less
+#else
+// Fall back to the old way of forward declaring std::less
+#define __WI_HAS_STD_LESS 1
+#pragma warning(push)
+#pragma warning(disable:4643) // Forward declaring '...' in namespace std is not permitted by the C++ Standard.
 namespace std
 {
-    template<class _Elem, class _Traits, class _Alloc>
-    class basic_string;
-
     template<class _Ty>
     struct less;
 }
-/// @endcond
+#pragma warning(pop)
 #endif
+#endif
+/// @endcond
 
 // This enables this code to be used in code that uses the ABI prefix or not.
 // Code using the public SDK and C++ CX code has the ABI prefix, windows internal
@@ -145,16 +154,17 @@ namespace wil
                 return str;
             }
 
-#ifdef WIL_ENABLE_EXCEPTIONS
-            template<class TraitsT, class AllocT>
-            static const wchar_t* get_buffer(
-                const std::basic_string<wchar_t, TraitsT, AllocT>& str,
-                UINT32* length) WI_NOEXCEPT
+            // Overload for std::wstring, or at least things that behave like std::wstring, without adding a dependency
+            // on STL headers
+            template <typename StringT>
+            static wistd::enable_if_t<wistd::conjunction_v<
+                wistd::is_same<const wchar_t*, decltype(wistd::declval<StringT>().c_str())>,
+                wistd::is_same<typename StringT::size_type, decltype(wistd::declval<StringT>().length())>>,
+            const wchar_t*> get_buffer(const StringT& str, UINT32* length) WI_NOEXCEPT
             {
                 *length = static_cast<UINT32>(str.length());
                 return str.c_str();
             }
-#endif
 
             template <typename LhsT, typename RhsT>
             static auto compare(LhsT&& lhs, RhsT&& rhs) ->
@@ -239,9 +249,10 @@ namespace wil
     // Validate stream contents, sizes must match, string must be null terminated.
     RETURN_IF_FAILED(stringConstructor.Validate(bytesRead));
 
-    Microsoft::WRL::Wrappers::HString string;
-    string.Attach(stringConstructor.Promote());
+    wil::unique_hstring string { stringConstructor.Promote() };
     ~~~
+
+    See also wil::unique_hstring_buffer.
     */
     struct TwoPhaseHStringConstructor
     {
@@ -249,48 +260,38 @@ namespace wil
         TwoPhaseHStringConstructor(const TwoPhaseHStringConstructor&) = delete;
         void operator=(const TwoPhaseHStringConstructor&) = delete;
 
-        TwoPhaseHStringConstructor(TwoPhaseHStringConstructor&& other)
+        TwoPhaseHStringConstructor(TwoPhaseHStringConstructor&& other) WI_NOEXCEPT
         {
             m_characterLength = other.m_characterLength;
-            m_charBuffer = other.m_charBuffer;
-            m_bufferHandle = other.m_bufferHandle;
-            other.m_bufferHandle = nullptr;
+            other.m_characterLength = 0;
+            m_maker = wistd::move(other.m_maker);
         }
 
         static TwoPhaseHStringConstructor Preallocate(UINT32 characterLength)
         {
-            TwoPhaseHStringConstructor result(characterLength);
-            // Client test for allocation failure by testing the result with .Get()
-            WindowsPreallocateStringBuffer(result.m_characterLength, &result.m_charBuffer, &result.m_bufferHandle);
-            return result;
+            return TwoPhaseHStringConstructor{ characterLength };
         }
 
         //! Returns the HSTRING after it has been populated like Detatch() or release(); be sure to put this in a RAII type to manage its lifetime.
         HSTRING Promote()
         {
-            HSTRING result;
-            const auto hr = WindowsPromoteStringBuffer(m_bufferHandle, &result);
-            FAIL_FAST_IF_FAILED(hr);  // Failure here is only due to invalid input, nul terminator overwritten, a bug in the usage.
-            m_bufferHandle = nullptr; // after promotion must not delete
-            return result;
+            m_characterLength = 0;
+            return m_maker.release().release();
         }
 
-        ~TwoPhaseHStringConstructor()
-        {
-            WindowsDeleteStringBuffer(m_bufferHandle); // ok to call with null
-        }
+        ~TwoPhaseHStringConstructor() = default;
 
         explicit operator PCWSTR() const
         {
             // This is set by WindowsPromoteStringBuffer() which must be called to
             // construct this object via the static method Preallocate().
-            return m_charBuffer;
+            return m_maker.buffer();
         }
 
         //! Returns a pointer for the buffer so it can be populated
-        wchar_t* Get() const { return m_charBuffer; }
+        wchar_t* Get() const { return const_cast<wchar_t*>(m_maker.buffer()); }
         //! Used to validate range of buffer when populating.
-        ULONG ByteSize() const { return m_characterLength * sizeof(*m_charBuffer); }
+        ULONG ByteSize() const { return m_characterLength * sizeof(wchar_t); }
 
         /** Ensure that the size of the data provided is consistent with the pre-allocated buffer.
         It seems that WindowsPreallocateStringBuffer() provides the null terminator in the buffer
@@ -301,18 +302,18 @@ namespace wil
             // Null termination is required for the buffer before calling WindowsPromoteStringBuffer().
             RETURN_HR_IF(HRESULT_FROM_WIN32(ERROR_INVALID_DATA),
                 (bytesRead != ByteSize()) ||
-                (m_charBuffer[m_characterLength] != L'\0'));
+                (Get()[m_characterLength] != L'\0'));
             return S_OK;
         }
 
     private:
         TwoPhaseHStringConstructor(UINT32 characterLength) : m_characterLength(characterLength)
         {
+            (void)m_maker.make(nullptr, characterLength);
         }
 
         UINT32 m_characterLength;
-        wchar_t *m_charBuffer;
-        HSTRING_BUFFER m_bufferHandle = nullptr;
+        details::string_maker<unique_hstring> m_maker;
     };
 
     //! A transparent less-than comparison function object that enables comparison of various string types intended for
@@ -452,7 +453,7 @@ namespace wil
                 T* GetAddressOf()  { return &m_value; }
                 T* ReleaseAndGetAddressOf() { return &m_value; }
                 T* operator&()     { return &m_value; }
-                T m_value;
+                T m_value{};
             };
             #pragma warning(pop)
         };
@@ -596,9 +597,12 @@ namespace wil
 
             vector_iterator& operator=(const vector_iterator& other)
             {
-                m_v = other.m_v;
-                m_i = other.m_i;
-                err_policy::HResult(other.m_element.CopyTo(m_element.ReleaseAndGetAddressOf()));
+                if (this != wistd::addressof(other))
+                {
+                    m_v = other.m_v;
+                    m_i = other.m_i;
+                    err_policy::HResult(other.m_element.CopyTo(m_element.ReleaseAndGetAddressOf()));
+                }
                 return *this;
             }
 
@@ -1280,9 +1284,9 @@ namespace details
     //     LastType<int, bool>::type boolValue;
     template <typename... Ts> struct LastType
     {
-        template<typename T, typename... Ts> struct LastTypeOfTs
+        template<typename T, typename... OtherTs> struct LastTypeOfTs
         {
-            typedef typename LastTypeOfTs<Ts...>::type type;
+            typedef typename LastTypeOfTs<OtherTs...>::type type;
         };
 
         template<typename T> struct LastTypeOfTs<T>
@@ -1290,8 +1294,8 @@ namespace details
             typedef T type;
         };
 
-        template<typename... Ts>
-        static typename LastTypeOfTs<Ts...>::type LastTypeOfTsFunc() {}
+        template<typename... OtherTs>
+        static typename LastTypeOfTs<OtherTs...>::type LastTypeOfTsFunc() {}
         typedef decltype(LastTypeOfTsFunc<Ts...>()) type;
     };
 
@@ -1321,12 +1325,12 @@ namespace details
         typedef wistd::remove_pointer_t<decltype(GetAsyncDelegateType(operation))> TIDelegate;
 
         auto callback = Callback<Implements<RuntimeClassFlags<ClassicCom>, TIDelegate, TBaseAgility>>(
-            [func = wistd::forward<TFunction>(func)](TIOperation operation, AsyncStatus status) mutable -> HRESULT
+            [func = wistd::forward<TFunction>(func)](TIOperation operation, ABI::Windows::Foundation::AsyncStatus status) mutable -> HRESULT
         {
             HRESULT hr = S_OK;
-            if (status != AsyncStatus::Completed)   // avoid a potentially costly marshaled QI / call if we completed successfully
+            if (status != ABI::Windows::Foundation::AsyncStatus::Completed)   // avoid a potentially costly marshaled QI / call if we completed successfully
             {
-                ComPtr<IAsyncInfo> asyncInfo;
+                ComPtr<ABI::Windows::Foundation::IAsyncInfo> asyncInfo;
                 operation->QueryInterface(IID_PPV_ARGS(&asyncInfo)); // All must implement IAsyncInfo
                 asyncInfo->get_ErrorCode(&hr);
             }
@@ -1346,19 +1350,19 @@ namespace details
         typedef wistd::remove_pointer_t<decltype(GetAsyncDelegateType(operation))> TIDelegate;
 
         auto callback = Callback<Implements<RuntimeClassFlags<ClassicCom>, TIDelegate, TBaseAgility>>(
-            [func = wistd::forward<TFunction>(func)](TIOperation operation, AsyncStatus status) mutable -> HRESULT
+            [func = wistd::forward<TFunction>(func)](TIOperation operation, ABI::Windows::Foundation::AsyncStatus status) mutable -> HRESULT
         {
             typename details::MapToSmartType<typename GetAbiType<typename wistd::remove_pointer<TIOperation>::type::TResult_complex>::type>::type result;
 
             HRESULT hr = S_OK;
-            if (status == AsyncStatus::Completed)
+            if (status == ABI::Windows::Foundation::AsyncStatus::Completed)
             {
                 hr = operation->GetResults(result.GetAddressOf());
             }
             else
             {
                 // avoid a potentially costly marshaled QI / call if we completed successfully
-                ComPtr<IAsyncInfo> asyncInfo;
+                ComPtr<ABI::Windows::Foundation::IAsyncInfo> asyncInfo;
                 operation->QueryInterface(IID_PPV_ARGS(&asyncInfo)); // all must implement this
                 asyncInfo->get_ErrorCode(&hr);
             }
@@ -1369,6 +1373,7 @@ namespace details
         return operation->put_Completed(callback.Get());
     }
 
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
     template <typename TIOperation>
     HRESULT WaitForCompletion(_In_ TIOperation operation, COWAIT_FLAGS flags, DWORD timeoutValue, _Out_opt_ bool* timedOut) WI_NOEXCEPT
     {
@@ -1383,7 +1388,7 @@ namespace details
                 RETURN_HR(m_completedEventHandle.create());
             }
 
-            HRESULT STDMETHODCALLTYPE Invoke(_In_ TIOperation, AsyncStatus status) override
+            HRESULT STDMETHODCALLTYPE Invoke(_In_ TIOperation, ABI::Windows::Foundation::AsyncStatus status) override
             {
                 m_status = status;
                 m_completedEventHandle.SetEvent();
@@ -1395,13 +1400,13 @@ namespace details
                 return m_completedEventHandle.get();
             }
 
-            AsyncStatus GetStatus() const
+            ABI::Windows::Foundation::AsyncStatus GetStatus() const
             {
                 return m_status;
             }
 
         private:
-            volatile AsyncStatus m_status = AsyncStatus::Started;
+            volatile ABI::Windows::Foundation::AsyncStatus m_status = ABI::Windows::Foundation::AsyncStatus::Started;
             wil::unique_event_nothrow m_completedEventHandle;
         };
 
@@ -1424,9 +1429,9 @@ namespace details
         }
         RETURN_IF_FAILED(hr);
 
-        if (completedDelegate->GetStatus() != AsyncStatus::Completed)
+        if (completedDelegate->GetStatus() != ABI::Windows::Foundation::AsyncStatus::Completed)
         {
-            Microsoft::WRL::ComPtr<IAsyncInfo> asyncInfo;
+            Microsoft::WRL::ComPtr<ABI::Windows::Foundation::IAsyncInfo> asyncInfo;
             operation->QueryInterface(IID_PPV_ARGS(&asyncInfo)); // all must implement this
             hr = E_UNEXPECTED;
             asyncInfo->get_ErrorCode(&hr); // error return ignored, ok?
@@ -1442,30 +1447,32 @@ namespace details
         RETURN_IF_FAILED_EXPECTED(details::WaitForCompletion(operation, flags, timeoutValue, timedOut));
         return operation->GetResults(result);
     }
+#endif // WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 }
 /// @endcond
 
 /** Set the completion callback for an async operation to run a caller provided function.
 Once complete the function is called with the error code result of the operation
-and the async operation object. That can be used to retrieve the result of the operation
-if there is one.
-The function parameter list must be (HRESULT hr, IResultInterface* operation)
+and the async operation result (if applicable).
+The function parameter list must be (HRESULT hr) for actions,
+(HRESULT hr, IResultInterface* object) for operations that produce interfaces,
+and (HRESULT hr, TResult value) for operations that produce value types.
 ~~~
-run_when_complete<StorageFile*>(getFileOp.Get(), [](HRESULT result, IStorageFile* file) -> void
+run_when_complete(getFileOp.Get(), [](HRESULT hr, IStorageFile* file) -> void
 {
 
 });
 ~~~
 for an agile callback use Microsoft::WRL::FtmBase
 ~~~
-run_when_complete<StorageFile*, FtmBase>(getFileOp.Get(), [](HRESULT result, IStorageFile* file) -> void
+run_when_complete<FtmBase>(getFileOp.Get(), [](HRESULT hr, IStorageFile* file) -> void
 {
 
 });
 ~~~
 Using the non throwing form:
 ~~~
-hr = run_when_complete_nothrow<StorageFile*>(getFileOp.Get(), [](HRESULT result, IStorageFile* file) -> HRESULT
+hr = run_when_complete_nothrow<StorageFile*>(getFileOp.Get(), [](HRESULT hr, IStorageFile* file) -> HRESULT
 {
 
 });
@@ -1524,6 +1531,7 @@ void run_when_complete(_In_ ABI::Windows::Foundation::IAsyncActionWithProgress<T
 }
 #endif
 
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 /** Wait for an asynchronous operation to complete (or be canceled).
 Use to synchronously wait on async operations on background threads.
 Do not call from UI threads or STA threads as reentrancy will result.
@@ -1624,6 +1632,7 @@ auto call_and_wait_for_completion(I* object, HRESULT(STDMETHODCALLTYPE I::*func)
     return wil::wait_for_completion(op.Get());
 }
 #endif
+#endif // WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 
 #pragma endregion
 
@@ -1670,7 +1679,7 @@ namespace details
 
         IFACEMETHODIMP put_Completed(ABI::Windows::Foundation::IAsyncOperationCompletedHandler<TResult>* competed) override
         {
-            competed->Invoke(this, AsyncStatus::Completed);
+            competed->Invoke(this, ABI::Windows::Foundation::AsyncStatus::Completed);
             return S_OK;
         }
 
@@ -1709,7 +1718,7 @@ namespace details
     public:
         IFACEMETHODIMP put_Completed(ABI::Windows::Foundation::IAsyncActionCompletedHandler* competed) override
         {
-            competed->Invoke(this, AsyncStatus::Completed);
+            competed->Invoke(this, ABI::Windows::Foundation::AsyncStatus::Completed);
             return S_OK;
         }
 
@@ -1738,7 +1747,7 @@ HRESULT make_synchronous_async_operation_nothrow(ABI::Windows::Foundation::IAsyn
     return Microsoft::WRL::MakeAndInitialize<details::SyncAsyncOp<TResult>>(result, value);
 }
 
-//! Creates a WinRT async operation object that implements IAsyncOperation<TResult>. Use mostly for testing and for mocking APIs.
+//! Creates a WinRT async operation object that implements IAsyncAction. Use mostly for testing and for mocking APIs.
 inline HRESULT make_synchronous_async_action_nothrow(ABI::Windows::Foundation::IAsyncAction** result)
 {
     return Microsoft::WRL::MakeAndInitialize<details::SyncAsyncActionOp>(result);
@@ -1753,7 +1762,7 @@ void make_synchronous_async_operation(ABI::Windows::Foundation::IAsyncOperation<
     THROW_IF_FAILED((Microsoft::WRL::MakeAndInitialize<details::SyncAsyncOp<TResult>>(result, value)));
 }
 
-//! Creates a WinRT async operation object that implements IAsyncOperation<TResult>. Use mostly for testing and for mocking APIs.
+//! Creates a WinRT async operation object that implements IAsyncAction. Use mostly for testing and for mocking APIs.
 inline void make_synchronous_async_action(ABI::Windows::Foundation::IAsyncAction** result)
 {
     THROW_IF_FAILED((Microsoft::WRL::MakeAndInitialize<details::SyncAsyncActionOp>(result)));
@@ -1867,7 +1876,19 @@ public:
             }
             else
             {
-                auto resolvedSender = m_weakSender.Resolve<T>();
+                auto resolvedSender = [&]()
+                {
+                    try
+                    {
+                        return m_weakSender.Resolve<T>();
+                    }
+                    catch (...)
+                    {
+                        // Ignore RPC or other failures that are unavoidable in some cases
+                        // matching wil::unique_winrt_event_token and winrt::event_revoker
+                        return static_cast<T^>(nullptr);
+                    }
+                }();
                 if (resolvedSender)
                 {
                     (resolvedSender->*m_removalFunction)(m_token);
@@ -2206,7 +2227,7 @@ struct ABI::Windows::Foundation::IAsyncOperationWithProgressCompletedHandler<ABI
 #pragma pop_macro("ABI")
 #endif
 
-#ifdef WIL_ENABLE_EXCEPTIONS
+#if __WI_HAS_STD_LESS
 
 namespace std
 {

@@ -38,6 +38,7 @@ TEST_CASE("TokenHelpersTests::VerifyOpenCurrentAccessToken", "[token_helpers]")
 }
 #endif
 
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
 TEST_CASE("TokenHelpersTests::VerifyGetTokenInformationNoThrow", "[token_helpers]")
 {
     SECTION("Passing a null token")
@@ -91,6 +92,7 @@ TEST_CASE("TokenHelpersTests::VerifyLinkedToken", "[token_helpers]")
     REQUIRE_NOTHROW(wil::get_linked_token_information());
 #endif
 }
+#endif
 #endif
 
 bool IsImpersonating()
@@ -186,6 +188,7 @@ TEST_CASE("TokenHelpersTests::VerifyResetThreadToken", "[token_helpers]")
 }
 #endif // WIL_ENABLE_EXCEPTIONS
 
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
 template <typename T, wistd::enable_if_t<!wil::details::MapTokenStructToInfoClass<T>::FixedSize>* = nullptr>
 void TestGetTokenInfoForCurrentThread()
 {
@@ -251,6 +254,40 @@ TEST_CASE("TokenHelpersTests::VerifyGetTokenInformationSecurityImpersonationLeve
 
     RevertToSelf();
 }
+#endif
+
+bool operator==(const SID_IDENTIFIER_AUTHORITY& left, const SID_IDENTIFIER_AUTHORITY& right)
+{
+    return memcmp(&left, &right, sizeof(left)) == 0;
+}
+
+TEST_CASE("TokenHelpersTests::StaticSid", "[token_helpers]")
+{
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    auto staticSid = wil::make_static_sid(SECURITY_NT_AUTHORITY, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_GUESTS);
+    auto largerSid = wil::make_static_sid(SECURITY_NT_AUTHORITY, SECURITY_BUILTIN_DOMAIN_RID, DOMAIN_ALIAS_RID_GUESTS, DOMAIN_ALIAS_RID_BACKUP_OPS);
+
+    largerSid = staticSid;
+    largerSid = largerSid;
+    // staticSid = largerSid; // Uncommenting this correctly fails to compile.
+
+    REQUIRE(IsValidSid(staticSid.get()));
+    REQUIRE(*GetSidSubAuthorityCount(staticSid.get()) == 2);
+    REQUIRE(*GetSidIdentifierAuthority(staticSid.get()) == ntAuthority);
+    REQUIRE(*GetSidSubAuthority(staticSid.get(), 0) == SECURITY_BUILTIN_DOMAIN_RID);
+    REQUIRE(*GetSidSubAuthority(staticSid.get(), 1) == DOMAIN_ALIAS_RID_GUESTS);
+}
+
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+TEST_CASE("TokenHelpersTests::TestMembership", "[token_helpers]")
+{
+    bool member;
+    REQUIRE_SUCCEEDED(wil::test_token_membership_nothrow(
+        &member,
+        GetCurrentThreadEffectiveToken(),
+        SECURITY_NT_AUTHORITY,
+        SECURITY_AUTHENTICATED_USER_RID));
+}
 
 #ifdef WIL_ENABLE_EXCEPTIONS
 
@@ -286,3 +323,4 @@ TEST_CASE("TokenHelpersTests::Verify_impersonate_token", "[token_helpers]")
     REQUIRE_NOTHROW(wil::get_token_information<TOKEN_TYPE>());
 }
 #endif // WIL_ENABLE_EXCEPTIONS
+#endif

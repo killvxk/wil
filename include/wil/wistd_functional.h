@@ -38,6 +38,7 @@
 // DO NOT add *any* additional includes to this file -- there should be no dependencies from its usage
 #include "wistd_memory.h"
 #include <intrin.h> // For __fastfail
+#include <new.h> // For placement new
 
 #if !defined(__WI_LIBCPP_HAS_NO_PRAGMA_SYSTEM_HEADER)
 #pragma GCC system_header
@@ -45,6 +46,7 @@
 
 #pragma warning(push)
 #pragma warning(disable: 4324)
+#pragma warning(disable: 4800)
 
 /// @cond
 namespace wistd     // ("Windows Implementation" std)
@@ -95,7 +97,7 @@ namespace wistd     // ("Windows Implementation" std)
 #ifndef __WI_LIBCPP_CXX03_LANG
         template <class ..._Args>
         static void __call(_Args&&... __args) {
-            __invoke(wistd::forward<_Args>(__args)...);
+            (void)__invoke(wistd::forward<_Args>(__args)...);
         }
 #else
         template <class _Fn>
@@ -261,6 +263,7 @@ namespace wistd     // ("Windows Implementation" std)
         static constexpr size_t __buffer_size = 13 * sizeof(void*);
 
         typedef __function::__base<_Rp(_ArgTypes...)> __base;
+        __WI_LIBCPP_SUPPRESS_NONINIT_ANALYSIS
         typename aligned_storage<__buffer_size>::type __buf_;
         __base* __f_;
 
@@ -297,7 +300,7 @@ namespace wistd     // ("Windows Implementation" std)
         typedef _Rp result_type;
 
         // construct/copy/destroy:
-        __WI_LIBCPP_INLINE_VISIBILITY
+        __WI_LIBCPP_INLINE_VISIBILITY __WI_LIBCPP_SUPPRESS_NONINIT_ANALYSIS
         function() WI_NOEXCEPT : __f_(0) {}
         __WI_LIBCPP_INLINE_VISIBILITY
         function(nullptr_t) WI_NOEXCEPT : __f_(0) {}
@@ -335,6 +338,7 @@ namespace wistd     // ("Windows Implementation" std)
     };
 
     template<class _Rp, class ..._ArgTypes>
+    __WI_LIBCPP_SUPPRESS_NONINIT_ANALYSIS
     function<_Rp(_ArgTypes...)>::function(const function& __f)
     {
         if (__f.__f_ == 0)
@@ -347,6 +351,7 @@ namespace wistd     // ("Windows Implementation" std)
     }
 
     template<class _Rp, class ..._ArgTypes>
+    __WI_LIBCPP_SUPPRESS_NONINIT_ANALYSIS __WI_LIBCPP_SUPPRESS_NOEXCEPT_ANALYSIS
     function<_Rp(_ArgTypes...)>::function(function&& __f)
     {
         if (__f.__f_ == 0)
@@ -362,6 +367,7 @@ namespace wistd     // ("Windows Implementation" std)
 
     template<class _Rp, class ..._ArgTypes>
     template <class _Fp, class>
+    __WI_LIBCPP_SUPPRESS_NONINIT_ANALYSIS
     function<_Rp(_ArgTypes...)>::function(_Fp __f)
         : __f_(0)
     {
@@ -516,9 +522,18 @@ namespace wistd     // ("Windows Implementation" std)
     swap_wil(function<_Rp(_ArgTypes...)>& __x, function<_Rp(_ArgTypes...)>& __y)
     {return __x.swap(__y);}
 
+    // std::invoke
+    template <class _Fn, class ..._Args>
+    typename __invoke_of<_Fn, _Args...>::type
+    invoke(_Fn&& __f, _Args&&... __args)
+        __WI_NOEXCEPT_((__nothrow_invokable<_Fn, _Args...>::value))
+    {
+        return wistd::__invoke(wistd::forward<_Fn>(__f), wistd::forward<_Args>(__args)...);
+    }
+
 #else // __WI_LIBCPP_CXX03_LANG
 
-#error wistd::function not implemented for pre-C++11
+#error wistd::function and wistd::invoke not implemented for pre-C++11
 
 #endif
 }

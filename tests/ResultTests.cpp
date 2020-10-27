@@ -1,8 +1,12 @@
 
-#include <roerrorapi.h>
 #include <wil/com.h>
 #include <wil/result.h>
+
+#if (NTDDI_VERSION >= NTDDI_WIN8)
 #include <wil/result_originate.h>
+#endif
+
+#include <roerrorapi.h>
 
 #include "common.h"
 
@@ -23,7 +27,7 @@ struct SharedObject
     {
     }
 
-    int value;
+    int value{};
 };
 
 TEST_CASE("ResultTests::SemaphoreValue", "[result]")
@@ -478,7 +482,7 @@ TEST_CASE("ResultTests::ErrorMacros", "[result]")
 }
 
 // The originate helper isn't compatible with CX so don't test it in that mode.
-#ifndef __cplusplus_winrt
+#if !defined(__cplusplus_winrt) && (NTDDI_VERSION >= NTDDI_WIN8)
 TEST_CASE("ResultTests::NoOriginationByDefault", "[result]")
 {
     ::wil::SetOriginateErrorCallback(nullptr);
@@ -571,4 +575,4 @@ TEST_CASE("ResultTests::AutomaticOriginationOnFailure", "[result]")
     }();
     REQUIRE(S_FALSE == GetRestrictedErrorInfo(&restrictedErrorInformation));
 }
-#endif // __cplusplus_winrt
+#endif

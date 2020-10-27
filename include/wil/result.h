@@ -64,7 +64,7 @@ namespace wil
             SemaphoreValue(const SemaphoreValue&) = delete;
             SemaphoreValue& operator=(const SemaphoreValue&) = delete;
 
-            SemaphoreValue(SemaphoreValue&& other) :
+            SemaphoreValue(SemaphoreValue&& other) WI_NOEXCEPT :
                 m_semaphore(wistd::move(other.m_semaphore)),
                 m_semaphoreHigh(wistd::move(other.m_semaphoreHigh))
             {
@@ -91,7 +91,7 @@ namespace wil
             }
 
             template <typename T>
-            static HRESULT TryGetValue(PCWSTR name, _Out_ T* value, _Out_ bool *retrieved = nullptr)
+            static HRESULT TryGetValue(PCWSTR name, _Out_ T* value, _Out_opt_ bool *retrieved = nullptr)
             {
                 *value = static_cast<T>(0);
                 unsigned __int64 value64 = 0;
@@ -249,19 +249,23 @@ namespace wil
 
             void Release()
             {
-                auto lock = m_mutex.acquire();
-                if (--m_refCount == 0)
+                if (ProcessShutdownInProgress())
                 {
-                    // We must explicitly destroy our semaphores while holding the mutex
-                    m_value.Destroy();
-                    lock.reset();
-
-                    if (ProcessShutdownInProgress())
+                    // There are no other threads to contend with.
+                    if (--m_refCount == 0)
                     {
                         m_data.ProcessShutdown();
                     }
-                    else
+                }
+                else
+                {
+                    auto lock = m_mutex.acquire();
+                    if (--m_refCount == 0)
                     {
+                        // We must explicitly destroy our semaphores while holding the mutex
+                        m_value.Destroy();
+                        lock.reset();
+
                         this->~ProcessLocalStorageData();
                         ::HeapFree(::GetProcessHeap(), 0, this);
                     }
@@ -314,7 +318,7 @@ namespace wil
 
                 const DWORD size = static_cast<DWORD>(sizeof(ProcessLocalStorageData<T>));
 
-                unique_process_heap_ptr<ProcessLocalStorageData<T>> dataAlloc(static_cast<ProcessLocalStorageData<T>*>(::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, size)));
+                unique_process_heap_ptr<ProcessLocalStorageData<T>> dataAlloc(static_cast<ProcessLocalStorageData<T>*>(details::ProcessHeapAlloc(HEAP_ZERO_MEMORY, size)));
                 __WIL_PRIVATE_RETURN_IF_NULL_ALLOC(dataAlloc);
 
                 SemaphoreValue semaphoreValue;
@@ -402,10 +406,10 @@ namespace wil
 
                 if (shouldAllocate)
                 {
-                    Node *pNew = reinterpret_cast<Node *>(::HeapAlloc(::GetProcessHeap(), 0, sizeof(Node)));
+                    Node *pNew = reinterpret_cast<Node *>(details::ProcessHeapAlloc(0, sizeof(Node)));
                     if (pNew != nullptr)
                     {
-                        new(pNew)Node(threadId);
+                        new(pNew)Node{ threadId };
 
                         Node *pFirst;
                         do
@@ -424,16 +428,9 @@ namespace wil
 
             struct Node
             {
-                T value;
                 DWORD threadId;
-                Node *pNext;
-
-                Node(DWORD currentThreadId) :
-                    value(),
-                    threadId(currentThreadId),
-                    pNext(nullptr)
-                {
-                }
+                Node* pNext = nullptr;
+                T value{};
             };
 
             Node * volatile m_hashArray[10]{};
@@ -490,7 +487,7 @@ namespace wil
 
                 if (!stringBuffer || (stringBufferSize < neededSize))
                 {
-                    auto newBuffer = ::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, neededSize);
+                    auto newBuffer = details::ProcessHeapAlloc(HEAP_ZERO_MEMORY, neededSize);
                     if (newBuffer)
                     {
                         ::HeapFree(::GetProcessHeap(), 0, stringBuffer);
@@ -506,7 +503,8 @@ namespace wil
 
                     pBuffer = details::WriteResultString(pBuffer, pBufferEnd, info.pszFile, &fileName);
                     pBuffer = details::WriteResultString(pBuffer, pBufferEnd, info.pszModule, &modulePath);
-                    details::WriteResultString(pBuffer, pBufferEnd, info.pszMessage, &message);
+                    pBuffer = details::WriteResultString(pBuffer, pBufferEnd, info.pszMessage, &message);
+                    ZeroMemory(pBuffer, pBufferEnd - pBuffer);
                 }
             }
 
@@ -567,7 +565,7 @@ namespace wil
                 if (!errors && create)
                 {
                     const unsigned short errorCount = 5;
-                    errors = reinterpret_cast<ThreadLocalFailureInfo *>(::HeapAlloc(::GetProcessHeap(), HEAP_ZERO_MEMORY, errorCount * sizeof(ThreadLocalFailureInfo)));
+                    errors = reinterpret_cast<ThreadLocalFailureInfo *>(details::ProcessHeapAlloc(HEAP_ZERO_MEMORY, errorCount * sizeof(ThreadLocalFailureInfo)));
                     if (errors)
                     {
                         errorAllocCount = errorCount;
@@ -680,7 +678,7 @@ namespace wil
                 // NOTE:  FailureType::Log as it's only informative (no action) and SupportedExceptions::All as it's not a barrier, only recognition.
                 wchar_t message[2048];
                 message[0] = L'\0';
-                const HRESULT hr = details::ReportFailure_CaughtExceptionCommon(__R_DIAGNOSTICS_RA(source, returnAddress), FailureType::Log, message, ARRAYSIZE(message), SupportedExceptions::All);
+                const HRESULT hr = details::ReportFailure_CaughtExceptionCommon<FailureType::Log>(__R_DIAGNOSTICS_RA(source, returnAddress), message, ARRAYSIZE(message), SupportedExceptions::All).hr;
 
                 // Now that the exception was logged, we should be able to fetch it.
                 return GetLastError(info, minSequenceId, hr);
@@ -848,8 +846,8 @@ namespace wil
 
     private:
         details_abi::ThreadLocalData* m_data;
-        unsigned long m_sequenceIdStart;
-        unsigned long m_sequenceIdLast;
+        unsigned long m_sequenceIdStart{};
+        unsigned long m_sequenceIdLast{};
     };
 
 
@@ -1069,7 +1067,7 @@ namespace wil
         class ThreadFailureCallbackFn final : public IFailureCallback
         {
         public:
-            explicit ThreadFailureCallbackFn(_In_ CallContextInfo *pContext, _Inout_ TLambda &&errorFunction) WI_NOEXCEPT :
+            explicit ThreadFailureCallbackFn(_In_opt_ CallContextInfo *pContext, _Inout_ TLambda &&errorFunction) WI_NOEXCEPT :
                 m_errorFunction(wistd::move(errorFunction)),
                 m_callbackHolder(this, pContext)
             {
@@ -1130,15 +1128,20 @@ namespace wil
         static unsigned char s_processLocalData[sizeof(*details_abi::g_pProcessLocalData)];
         static unsigned char s_threadFailureCallbacks[sizeof(*details::g_pThreadFailureCallbacks)];
 
-        details::InitGlobalWithStorage(state, s_processLocalData, details_abi::g_pProcessLocalData, "WilError_02");
+        details::InitGlobalWithStorage(state, s_processLocalData, details_abi::g_pProcessLocalData, "WilError_03");
         details::InitGlobalWithStorage(state, s_threadFailureCallbacks, details::g_pThreadFailureCallbacks);
+
+        if (state == WilInitializeCommand::Create)
+        {
+            details::g_pfnGetContextAndNotifyFailure = details::GetContextAndNotifyFailure;
+        }
     }
 
     /// @cond
     namespace details
     {
 #ifndef RESULT_SUPPRESS_STATIC_INITIALIZERS
-        __declspec(selectany) ::wil::details_abi::ProcessLocalStorage<::wil::details_abi::ProcessLocalData> g_processLocalData("WilError_02");
+        __declspec(selectany) ::wil::details_abi::ProcessLocalStorage<::wil::details_abi::ProcessLocalData> g_processLocalData("WilError_03");
         __declspec(selectany) ::wil::details_abi::ThreadLocalStorage<ThreadFailureCallbackHolder*> g_threadFailureCallbacks;
 
         WI_HEADER_INITITALIZATION_FUNCTION(InitializeResultHeader, []
@@ -1221,13 +1224,13 @@ namespace wil
         {
         }
 
-        ThreadFailureCache(ThreadFailureCache && rhs) :
+        ThreadFailureCache(ThreadFailureCache && rhs) WI_NOEXCEPT :
             m_failure(wistd::move(rhs.m_failure)),
             m_callbackHolder(this)
         {
         }
 
-        ThreadFailureCache& operator=(ThreadFailureCache && rhs)
+        ThreadFailureCache& operator=(ThreadFailureCache && rhs) WI_NOEXCEPT
         {
             m_failure = wistd::move(rhs.m_failure);
             return *this;

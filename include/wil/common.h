@@ -61,27 +61,21 @@
 #define WIL_WARN_DEPRECATED_1612_PRAGMA(...)
 #endif
 
-#if !defined(__cplusplus) || defined(__WIL_MIN_KERNEL)
-
-#define WI_ODR_PRAGMA(NAME, TOKEN)
-#define WI_NOEXCEPT
-
+#if defined(_MSVC_LANG)
+#define __WI_SUPPRESS_4127_S __pragma(warning(push)) __pragma(warning(disable:4127)) __pragma(warning(disable:26498)) __pragma(warning(disable:4245))
+#define __WI_SUPPRESS_4127_E __pragma(warning(pop))
+#define __WI_SUPPRESS_NULLPTR_ANALYSIS __pragma(warning(suppress:28285)) __pragma(warning(suppress:6504))
+#define __WI_SUPPRESS_NONINIT_ANALYSIS __pragma(warning(suppress:26495))
+#define __WI_SUPPRESS_NOEXCEPT_ANALYSIS __pragma(warning(suppress:26439))
 #else
-#pragma warning(push)
-#pragma warning(disable:4714)    // __forceinline not honored
-
-// DO NOT add *any* further includes to this file -- there should be no dependencies from its usage
-#include <sal.h>
-#include "wistd_type_traits.h"
-
-//! This macro inserts ODR violation protection; the macro allows it to be compatible with straight "C" code
-#define WI_ODR_PRAGMA(NAME, TOKEN)  __pragma(detect_mismatch("ODR_violation_" NAME "_mismatch", TOKEN))
-
-#ifdef WIL_KERNEL_MODE
-WI_ODR_PRAGMA("WIL_KERNEL_MODE", "1")
-#else
-WI_ODR_PRAGMA("WIL_KERNEL_MODE", "0")
+#define __WI_SUPPRESS_4127_S
+#define __WI_SUPPRESS_4127_E
+#define __WI_SUPPRESS_NULLPTR_ANALYSIS
+#define __WI_SUPPRESS_NONINIT_ANALYSIS
+#define __WI_SUPPRESS_NOEXCEPT_ANALYSIS
 #endif
+
+#include <sal.h>
 
 // Some SAL remapping / decoration to better support Doxygen.  Macros that look like function calls can
 // confuse Doxygen when they are used to decorate a function or variable.  We simplify some of these to
@@ -92,6 +86,180 @@ WI_ODR_PRAGMA("WIL_KERNEL_MODE", "0")
 #define __declspec_noinline_ __declspec(noinline)
 #define __declspec_selectany_ __declspec(selectany)
 /// @endcond
+
+//! @defgroup macrobuilding Macro Composition
+//! The following macros are building blocks primarily intended for authoring other macros.
+//! @{
+
+//! Re-state a macro value (indirection for composition)
+#define WI_FLATTEN(...)                     __VA_ARGS__
+
+/// @cond
+#define __WI_PASTE_imp(a, b)                a##b
+/// @endcond
+
+//! This macro is for use in other macros to paste two tokens together, such as a constant and the __LINE__ macro.
+#define WI_PASTE(a, b)                      __WI_PASTE_imp(a, b)
+
+/// @cond
+#define __WI_HAS_VA_OPT_IMPL(F, T, ...) T
+#define __WI_HAS_VA_OPT_(...) __WI_HAS_VA_OPT_IMPL(__VA_OPT__(0,) 1, 0)
+/// @endcond
+
+//! Evaluates to '1' when support for '__VA_OPT__' is available, else '0'
+#define WI_HAS_VA_OPT __WI_HAS_VA_OPT_(unused)
+
+/// @cond
+#define __WI_ARGS_COUNT1(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, \
+                         A30, A31, A32, A33, A34, A35, A36, A37, A38, A39, A40, A41, A42, A43, A44, A45, A46, A47, A48, A49, A50, A51, A52, A53, A54, A55, A56, A57, A58, A59, \
+                         A60, A61, A62, A63, A64, A65, A66, A67, A68, A69, A70, A71, A72, A73, A74, A75, A76, A77, A78, A79, A80, A81, A82, A83, A84, A85, A86, A87, A88, A89, \
+                         A90, A91, A92, A93, A94, A95, A96, A97, A98, A99, count, ...) count
+#define __WI_ARGS_COUNT0(...) WI_FLATTEN(__WI_ARGS_COUNT1(__VA_ARGS__, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, \
+                         79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50,  49, 48, 47, 46, 45, 44, 43, 42, 41, 40, \
+                         39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0))
+#define __WI_ARGS_COUNT_PREFIX(...) 0, __VA_ARGS__
+/// @endcond
+
+//! This variadic macro returns the number of arguments passed to it (up to 99).
+#if WI_HAS_VA_OPT
+#define WI_ARGS_COUNT(...) __WI_ARGS_COUNT0(0 __VA_OPT__(, __VA_ARGS__))
+#else
+#define WI_ARGS_COUNT(...) __WI_ARGS_COUNT0(__WI_ARGS_COUNT_PREFIX(__VA_ARGS__))
+#endif
+
+/// @cond
+#define __WI_FOR_imp0( fn)
+#define __WI_FOR_imp1( fn, arg)      fn(arg)
+#define __WI_FOR_imp2( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp1(fn, __VA_ARGS__))
+#define __WI_FOR_imp3( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp2(fn, __VA_ARGS__))
+#define __WI_FOR_imp4( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp3(fn, __VA_ARGS__))
+#define __WI_FOR_imp5( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp4(fn, __VA_ARGS__))
+#define __WI_FOR_imp6( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp5(fn, __VA_ARGS__))
+#define __WI_FOR_imp7( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp6(fn, __VA_ARGS__))
+#define __WI_FOR_imp8( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp7(fn, __VA_ARGS__))
+#define __WI_FOR_imp9( fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp8(fn, __VA_ARGS__))
+#define __WI_FOR_imp10(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp9(fn, __VA_ARGS__))
+#define __WI_FOR_imp11(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp10(fn, __VA_ARGS__))
+#define __WI_FOR_imp12(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp11(fn, __VA_ARGS__))
+#define __WI_FOR_imp13(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp12(fn, __VA_ARGS__))
+#define __WI_FOR_imp14(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp13(fn, __VA_ARGS__))
+#define __WI_FOR_imp15(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp14(fn, __VA_ARGS__))
+#define __WI_FOR_imp16(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp15(fn, __VA_ARGS__))
+#define __WI_FOR_imp17(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp16(fn, __VA_ARGS__))
+#define __WI_FOR_imp18(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp17(fn, __VA_ARGS__))
+#define __WI_FOR_imp19(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp18(fn, __VA_ARGS__))
+#define __WI_FOR_imp20(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp19(fn, __VA_ARGS__))
+#define __WI_FOR_imp21(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp20(fn, __VA_ARGS__))
+#define __WI_FOR_imp22(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp21(fn, __VA_ARGS__))
+#define __WI_FOR_imp23(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp22(fn, __VA_ARGS__))
+#define __WI_FOR_imp24(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp23(fn, __VA_ARGS__))
+#define __WI_FOR_imp25(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp24(fn, __VA_ARGS__))
+#define __WI_FOR_imp26(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp25(fn, __VA_ARGS__))
+#define __WI_FOR_imp27(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp26(fn, __VA_ARGS__))
+#define __WI_FOR_imp28(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp27(fn, __VA_ARGS__))
+#define __WI_FOR_imp29(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp28(fn, __VA_ARGS__))
+#define __WI_FOR_imp30(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp29(fn, __VA_ARGS__))
+#define __WI_FOR_imp31(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp30(fn, __VA_ARGS__))
+#define __WI_FOR_imp32(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp31(fn, __VA_ARGS__))
+#define __WI_FOR_imp33(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp32(fn, __VA_ARGS__))
+#define __WI_FOR_imp34(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp33(fn, __VA_ARGS__))
+#define __WI_FOR_imp35(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp34(fn, __VA_ARGS__))
+#define __WI_FOR_imp36(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp35(fn, __VA_ARGS__))
+#define __WI_FOR_imp37(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp36(fn, __VA_ARGS__))
+#define __WI_FOR_imp38(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp37(fn, __VA_ARGS__))
+#define __WI_FOR_imp39(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp38(fn, __VA_ARGS__))
+#define __WI_FOR_imp40(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp39(fn, __VA_ARGS__))
+#define __WI_FOR_imp41(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp40(fn, __VA_ARGS__))
+#define __WI_FOR_imp42(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp41(fn, __VA_ARGS__))
+#define __WI_FOR_imp43(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp42(fn, __VA_ARGS__))
+#define __WI_FOR_imp44(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp43(fn, __VA_ARGS__))
+#define __WI_FOR_imp45(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp44(fn, __VA_ARGS__))
+#define __WI_FOR_imp46(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp45(fn, __VA_ARGS__))
+#define __WI_FOR_imp47(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp46(fn, __VA_ARGS__))
+#define __WI_FOR_imp48(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp47(fn, __VA_ARGS__))
+#define __WI_FOR_imp49(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp48(fn, __VA_ARGS__))
+#define __WI_FOR_imp50(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp49(fn, __VA_ARGS__))
+#define __WI_FOR_imp51(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp50(fn, __VA_ARGS__))
+#define __WI_FOR_imp52(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp51(fn, __VA_ARGS__))
+#define __WI_FOR_imp53(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp52(fn, __VA_ARGS__))
+#define __WI_FOR_imp54(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp53(fn, __VA_ARGS__))
+#define __WI_FOR_imp55(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp54(fn, __VA_ARGS__))
+#define __WI_FOR_imp56(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp55(fn, __VA_ARGS__))
+#define __WI_FOR_imp57(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp56(fn, __VA_ARGS__))
+#define __WI_FOR_imp58(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp57(fn, __VA_ARGS__))
+#define __WI_FOR_imp59(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp58(fn, __VA_ARGS__))
+#define __WI_FOR_imp60(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp59(fn, __VA_ARGS__))
+#define __WI_FOR_imp61(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp60(fn, __VA_ARGS__))
+#define __WI_FOR_imp62(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp61(fn, __VA_ARGS__))
+#define __WI_FOR_imp63(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp62(fn, __VA_ARGS__))
+#define __WI_FOR_imp64(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp63(fn, __VA_ARGS__))
+#define __WI_FOR_imp65(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp64(fn, __VA_ARGS__))
+#define __WI_FOR_imp66(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp65(fn, __VA_ARGS__))
+#define __WI_FOR_imp67(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp66(fn, __VA_ARGS__))
+#define __WI_FOR_imp68(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp67(fn, __VA_ARGS__))
+#define __WI_FOR_imp69(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp68(fn, __VA_ARGS__))
+#define __WI_FOR_imp70(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp69(fn, __VA_ARGS__))
+#define __WI_FOR_imp71(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp70(fn, __VA_ARGS__))
+#define __WI_FOR_imp72(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp71(fn, __VA_ARGS__))
+#define __WI_FOR_imp73(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp72(fn, __VA_ARGS__))
+#define __WI_FOR_imp74(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp73(fn, __VA_ARGS__))
+#define __WI_FOR_imp75(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp74(fn, __VA_ARGS__))
+#define __WI_FOR_imp76(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp75(fn, __VA_ARGS__))
+#define __WI_FOR_imp77(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp76(fn, __VA_ARGS__))
+#define __WI_FOR_imp78(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp77(fn, __VA_ARGS__))
+#define __WI_FOR_imp79(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp78(fn, __VA_ARGS__))
+#define __WI_FOR_imp80(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp79(fn, __VA_ARGS__))
+#define __WI_FOR_imp81(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp80(fn, __VA_ARGS__))
+#define __WI_FOR_imp82(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp81(fn, __VA_ARGS__))
+#define __WI_FOR_imp83(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp82(fn, __VA_ARGS__))
+#define __WI_FOR_imp84(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp83(fn, __VA_ARGS__))
+#define __WI_FOR_imp85(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp84(fn, __VA_ARGS__))
+#define __WI_FOR_imp86(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp85(fn, __VA_ARGS__))
+#define __WI_FOR_imp87(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp86(fn, __VA_ARGS__))
+#define __WI_FOR_imp88(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp87(fn, __VA_ARGS__))
+#define __WI_FOR_imp89(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp88(fn, __VA_ARGS__))
+#define __WI_FOR_imp90(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp89(fn, __VA_ARGS__))
+#define __WI_FOR_imp91(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp90(fn, __VA_ARGS__))
+#define __WI_FOR_imp92(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp91(fn, __VA_ARGS__))
+#define __WI_FOR_imp93(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp92(fn, __VA_ARGS__))
+#define __WI_FOR_imp94(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp93(fn, __VA_ARGS__))
+#define __WI_FOR_imp95(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp94(fn, __VA_ARGS__))
+#define __WI_FOR_imp96(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp95(fn, __VA_ARGS__))
+#define __WI_FOR_imp97(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp96(fn, __VA_ARGS__))
+#define __WI_FOR_imp98(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp97(fn, __VA_ARGS__))
+#define __WI_FOR_imp99(fn, arg, ...) fn(arg) WI_FLATTEN(__WI_FOR_imp98(fn, __VA_ARGS__))
+
+#define __WI_FOR_imp(n, fnAndArgs)  WI_PASTE(__WI_FOR_imp, n) fnAndArgs
+/// @endcond
+
+//! Iterates through each of the given arguments invoking the specified macro against each one.
+#define WI_FOREACH(fn, ...) __WI_FOR_imp(WI_ARGS_COUNT(__VA_ARGS__), (fn, ##__VA_ARGS__))
+
+//! Dispatches a single macro name to separate macros based on the number of arguments passed to it.
+#define WI_MACRO_DISPATCH(name, ...) WI_PASTE(WI_PASTE(name, WI_ARGS_COUNT(__VA_ARGS__)), (__VA_ARGS__))
+
+//! @} // Macro composition helpers
+
+#if !defined(__cplusplus) || defined(__WIL_MIN_KERNEL)
+
+#define WI_ODR_PRAGMA(NAME, TOKEN)
+#define WI_NOEXCEPT
+
+#else
+#pragma warning(push)
+#pragma warning(disable:4714)    // __forceinline not honored
+
+// DO NOT add *any* further includes to this file -- there should be no dependencies from its usage
+#include "wistd_type_traits.h"
+
+//! This macro inserts ODR violation protection; the macro allows it to be compatible with straight "C" code
+#define WI_ODR_PRAGMA(NAME, TOKEN)  __pragma(detect_mismatch("ODR_violation_" NAME "_mismatch", TOKEN))
+
+#ifdef WIL_KERNEL_MODE
+WI_ODR_PRAGMA("WIL_KERNEL_MODE", "1")
+#else
+WI_ODR_PRAGMA("WIL_KERNEL_MODE", "0")
+#endif
 
 #if defined(_CPPUNWIND) && !defined(WIL_SUPPRESS_EXCEPTIONS)
 /** This define is automatically set when exceptions are enabled within wil.
@@ -159,149 +327,6 @@ Three exception modes are available:
 
 // Until we'll have C++17 enabled in our code base, we're falling back to SAL
 #define WI_NODISCARD __WI_LIBCPP_NODISCARD_ATTRIBUTE
-
-//! @defgroup macrobuilding Macro Composition
-//! The following macros are building blocks primarily intended for authoring other macros.
-//! @{
-
-//! Re-state a macro value (indirection for composition)
-#define WI_FLATTEN(...)                     __VA_ARGS__
-
-/// @cond
-#define __WI_PASTE_imp(a, b)                a##b
-/// @endcond
-
-//! This macro is for use in other macros to paste two tokens together, such as a constant and the __LINE__ macro.
-#define WI_PASTE(a, b)                      __WI_PASTE_imp(a, b)
-
-/// @cond
-#define __WI_ARGS_COUNT1(A0, A1, A2, A3, A4, A5, A6, A7, A8, A9, A10, A11, A12, A13, A14, A15, A16, A17, A18, A19, A20, A21, A22, A23, A24, A25, A26, A27, A28, A29, \
-                         A30, A31, A32, A33, A34, A35, A36, A37, A38, A39, A40, A41, A42, A43, A44, A45, A46, A47, A48, A49, A50, A51, A52, A53, A54, A55, A56, A57, A58, A59, \
-                         A60, A61, A62, A63, A64, A65, A66, A67, A68, A69, A70, A71, A72, A73, A74, A75, A76, A77, A78, A79, A80, A81, A82, A83, A84, A85, A86, A87, A88, A89, \
-                         A90, A91, A92, A93, A94, A95, A96, A97, A98, A99, count, ...) count
-#define __WI_ARGS_COUNT0(...) WI_FLATTEN(__WI_ARGS_COUNT1(__VA_ARGS__, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81, 80, \
-                         79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50,  49, 48, 47, 46, 45, 44, 43, 42, 41, 40, \
-                         39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0))
-#define __WI_ARGS_COUNT_PREFIX(...) 0, __VA_ARGS__
-/// @endcond
-
-//! This variadic macro returns the number of arguments passed to it (up to 99).
-#define WI_ARGS_COUNT(...) __WI_ARGS_COUNT0(__WI_ARGS_COUNT_PREFIX(__VA_ARGS__))
-
-/// @cond
-#define __WI_FOR_imp0( fn)
-#define __WI_FOR_imp1( fn, arg, ...) __WI_FOR_impN( 0, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp2( fn, arg, ...) __WI_FOR_impN( 1, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp3( fn, arg, ...) __WI_FOR_impN( 2, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp4( fn, arg, ...) __WI_FOR_impN( 3, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp5( fn, arg, ...) __WI_FOR_impN( 4, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp6( fn, arg, ...) __WI_FOR_impN( 5, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp7( fn, arg, ...) __WI_FOR_impN( 6, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp8( fn, arg, ...) __WI_FOR_impN( 7, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp9( fn, arg, ...) __WI_FOR_impN( 8, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp10(fn, arg, ...) __WI_FOR_impN( 9, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp11(fn, arg, ...) __WI_FOR_impN(10, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp12(fn, arg, ...) __WI_FOR_impN(11, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp13(fn, arg, ...) __WI_FOR_impN(12, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp14(fn, arg, ...) __WI_FOR_impN(13, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp15(fn, arg, ...) __WI_FOR_impN(14, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp16(fn, arg, ...) __WI_FOR_impN(15, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp17(fn, arg, ...) __WI_FOR_impN(16, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp18(fn, arg, ...) __WI_FOR_impN(17, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp19(fn, arg, ...) __WI_FOR_impN(18, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp20(fn, arg, ...) __WI_FOR_impN(19, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp21(fn, arg, ...) __WI_FOR_impN(20, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp22(fn, arg, ...) __WI_FOR_impN(21, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp23(fn, arg, ...) __WI_FOR_impN(22, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp24(fn, arg, ...) __WI_FOR_impN(23, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp25(fn, arg, ...) __WI_FOR_impN(24, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp26(fn, arg, ...) __WI_FOR_impN(25, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp27(fn, arg, ...) __WI_FOR_impN(26, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp28(fn, arg, ...) __WI_FOR_impN(27, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp29(fn, arg, ...) __WI_FOR_impN(28, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp30(fn, arg, ...) __WI_FOR_impN(29, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp31(fn, arg, ...) __WI_FOR_impN(30, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp32(fn, arg, ...) __WI_FOR_impN(31, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp33(fn, arg, ...) __WI_FOR_impN(32, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp34(fn, arg, ...) __WI_FOR_impN(33, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp35(fn, arg, ...) __WI_FOR_impN(34, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp36(fn, arg, ...) __WI_FOR_impN(35, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp37(fn, arg, ...) __WI_FOR_impN(36, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp38(fn, arg, ...) __WI_FOR_impN(37, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp39(fn, arg, ...) __WI_FOR_impN(38, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp40(fn, arg, ...) __WI_FOR_impN(39, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp41(fn, arg, ...) __WI_FOR_impN(40, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp42(fn, arg, ...) __WI_FOR_impN(41, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp43(fn, arg, ...) __WI_FOR_impN(42, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp44(fn, arg, ...) __WI_FOR_impN(43, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp45(fn, arg, ...) __WI_FOR_impN(44, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp46(fn, arg, ...) __WI_FOR_impN(45, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp47(fn, arg, ...) __WI_FOR_impN(46, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp48(fn, arg, ...) __WI_FOR_impN(47, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp49(fn, arg, ...) __WI_FOR_impN(48, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp50(fn, arg, ...) __WI_FOR_impN(49, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp51(fn, arg, ...) __WI_FOR_impN(50, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp52(fn, arg, ...) __WI_FOR_impN(51, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp53(fn, arg, ...) __WI_FOR_impN(52, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp54(fn, arg, ...) __WI_FOR_impN(53, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp55(fn, arg, ...) __WI_FOR_impN(54, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp56(fn, arg, ...) __WI_FOR_impN(55, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp57(fn, arg, ...) __WI_FOR_impN(56, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp58(fn, arg, ...) __WI_FOR_impN(57, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp59(fn, arg, ...) __WI_FOR_impN(58, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp60(fn, arg, ...) __WI_FOR_impN(59, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp61(fn, arg, ...) __WI_FOR_impN(60, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp62(fn, arg, ...) __WI_FOR_impN(61, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp63(fn, arg, ...) __WI_FOR_impN(62, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp64(fn, arg, ...) __WI_FOR_impN(63, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp65(fn, arg, ...) __WI_FOR_impN(64, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp66(fn, arg, ...) __WI_FOR_impN(65, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp67(fn, arg, ...) __WI_FOR_impN(66, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp68(fn, arg, ...) __WI_FOR_impN(67, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp69(fn, arg, ...) __WI_FOR_impN(68, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp70(fn, arg, ...) __WI_FOR_impN(69, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp71(fn, arg, ...) __WI_FOR_impN(70, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp72(fn, arg, ...) __WI_FOR_impN(71, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp73(fn, arg, ...) __WI_FOR_impN(72, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp74(fn, arg, ...) __WI_FOR_impN(73, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp75(fn, arg, ...) __WI_FOR_impN(74, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp76(fn, arg, ...) __WI_FOR_impN(75, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp77(fn, arg, ...) __WI_FOR_impN(76, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp78(fn, arg, ...) __WI_FOR_impN(77, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp79(fn, arg, ...) __WI_FOR_impN(78, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp80(fn, arg, ...) __WI_FOR_impN(79, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp81(fn, arg, ...) __WI_FOR_impN(80, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp82(fn, arg, ...) __WI_FOR_impN(81, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp83(fn, arg, ...) __WI_FOR_impN(82, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp84(fn, arg, ...) __WI_FOR_impN(83, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp85(fn, arg, ...) __WI_FOR_impN(84, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp86(fn, arg, ...) __WI_FOR_impN(85, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp87(fn, arg, ...) __WI_FOR_impN(86, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp88(fn, arg, ...) __WI_FOR_impN(87, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp89(fn, arg, ...) __WI_FOR_impN(88, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp90(fn, arg, ...) __WI_FOR_impN(89, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp91(fn, arg, ...) __WI_FOR_impN(90, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp92(fn, arg, ...) __WI_FOR_impN(91, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp93(fn, arg, ...) __WI_FOR_impN(92, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp94(fn, arg, ...) __WI_FOR_impN(93, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp95(fn, arg, ...) __WI_FOR_impN(94, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp96(fn, arg, ...) __WI_FOR_impN(95, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp97(fn, arg, ...) __WI_FOR_impN(96, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp98(fn, arg, ...) __WI_FOR_impN(97, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_imp99(fn, arg, ...) __WI_FOR_impN(98, fn, arg, fn, __VA_ARGS__)
-#define __WI_FOR_impN(n, fn, arg, ...) \
-    fn(arg) \
-    WI_PASTE(__WI_FOR_imp, n) WI_FLATTEN((__VA_ARGS__))
-#define __WI_FOR_imp(n, fnAndArgs)  WI_PASTE(__WI_FOR_imp, n) fnAndArgs
-/// @endcond
-
-//! Iterates through each of the given arguments invoking the specified macro against each one.
-#define WI_FOREACH(fn, ...) __WI_FOR_imp(WI_ARGS_COUNT(__VA_ARGS__), (fn, __VA_ARGS__))
-
-//! Dispatches a single macro name to separate macros based on the number of arguments passed to it.
-#define WI_MACRO_DISPATCH(name, ...) WI_PASTE(WI_PASTE(name, WI_ARGS_COUNT(__VA_ARGS__)), (__VA_ARGS__))
-
-//! @} // Macro composition helpers
 
 #define __R_ENABLE_IF_IS_CLASS(ptrType)                     wistd::enable_if_t<wistd::is_class<ptrType>::value, void*> = (void*)0
 #define __R_ENABLE_IF_IS_NOT_CLASS(ptrType)                 wistd::enable_if_t<!wistd::is_class<ptrType>::value, void*> = (void*)0
@@ -561,34 +586,35 @@ namespace wil
     @return A C++ bool representing the evaluation of `val`. */
     template <typename T, __R_ENABLE_IF_IS_CLASS(T)>
     _Post_satisfies_(return == static_cast<bool>(val))
-    __forceinline bool verify_bool(const T& val)
+    __forceinline constexpr bool verify_bool(const T& val)
     {
         return static_cast<bool>(val);
     }
 
     template <typename T, __R_ENABLE_IF_IS_NOT_CLASS(T)>
-    __forceinline bool verify_bool(T /*val*/)
+    __forceinline constexpr bool verify_bool(T /*val*/)
     {
         static_assert(!wistd::is_same<T, T>::value, "Wrong Type: bool/BOOL/BOOLEAN/boolean expected");
+        return false;
     }
 
     template <>
     _Post_satisfies_(return == val)
-    __forceinline bool verify_bool<bool>(bool val)
+    __forceinline constexpr bool verify_bool<bool>(bool val)
     {
         return val;
     }
 
     template <>
     _Post_satisfies_(return == (val != 0))
-    __forceinline bool verify_bool<int>(int val)
+    __forceinline constexpr bool verify_bool<int>(int val)
     {
         return (val != 0);
     }
 
     template <>
     _Post_satisfies_(return == !!val)
-    __forceinline bool verify_bool<unsigned char>(unsigned char val)
+    __forceinline constexpr bool verify_bool<unsigned char>(unsigned char val)
     {
         return !!val;
     }
@@ -600,7 +626,7 @@ namespace wil
     @return A Win32 BOOL representing the evaluation of `val`. */
     template <typename T>
     _Post_satisfies_(return == val)
-    __forceinline int verify_BOOL(T val)
+    __forceinline constexpr int verify_BOOL(T val)
     {
         // Note: Written in terms of 'int' as BOOL is actually:  typedef int BOOL;
         static_assert((wistd::is_same<T, int>::value), "Wrong Type: BOOL expected");
@@ -624,17 +650,47 @@ namespace wil
     When these are encountered in the public SDK, their type should not be changed and you should use a static_cast
     to use this value in a macro that utilizes `verify_hresult`, for example:
     ~~~~
-    RETURN_HR_IF_FALSE(static_cast<HRESULT>(UIA_E_NOTSUPPORTED), (patternId == UIA_DragPatternId));
+    RETURN_HR_IF(static_cast<HRESULT>(UIA_E_NOTSUPPORTED), (patternId != UIA_DragPatternId));
     ~~~~
     @param val The HRESULT returning expression
     @return An HRESULT representing the evaluation of `val`. */
     template <typename T>
     _Post_satisfies_(return == hr)
-    inline long verify_hresult(T hr)
+    inline constexpr long verify_hresult(T hr)
     {
-        // Note: Written in terms of 'int' as HRESULT is actually:  typedef _Return_type_success_(return >= 0) long HRESULT
+        // Note: Written in terms of 'long' as HRESULT is actually:  typedef _Return_type_success_(return >= 0) long HRESULT
         static_assert(wistd::is_same<T, long>::value, "Wrong Type: HRESULT expected");
         return hr;
+    }
+
+    /** Verify that `status` is an NTSTATUS value.
+    Other types will generate an intentional compilation error.  Note that this will accept any `long` value as that is the
+    underlying typedef behind NTSTATUS.
+    //!
+    Note that occasionally you might run into an NTSTATUS which is directly defined with a #define, such as:
+    ~~~~
+    #define STATUS_NOT_SUPPORTED             0x1
+    ~~~~
+    Though this looks like an `NTSTATUS`, this is actually an `unsigned long` (the hex specification forces this).  When
+    these are encountered and they are NOT in the public SDK (have not yet shipped to the public), then you should change
+    their definition to match the manner in which `NTSTATUS` constants are defined in ntstatus.h:
+    ~~~~
+    #define STATUS_NOT_SUPPORTED             ((NTSTATUS)0xC00000BBL)
+    ~~~~
+    When these are encountered in the public SDK, their type should not be changed and you should use a static_cast
+    to use this value in a macro that utilizes `verify_ntstatus`, for example:
+    ~~~~
+    NT_RETURN_IF_FALSE(static_cast<NTSTATUS>(STATUS_NOT_SUPPORTED), (dispatch->Version == HKE_V1_0));
+    ~~~~
+    @param val The NTSTATUS returning expression
+    @return An NTSTATUS representing the evaluation of `val`. */
+    template <typename T>
+    _Post_satisfies_(return == status)
+    inline long verify_ntstatus(T status)
+    {
+        // Note: Written in terms of 'long' as NTSTATUS is actually:  typedef _Return_type_success_(return >= 0) long NTSTATUS
+        static_assert(wistd::is_same<T, long>::value, "Wrong Type: NTSTATUS expected");
+        return status;
     }
     /// @}      // end type validation routines
 

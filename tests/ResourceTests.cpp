@@ -2,17 +2,64 @@
 // Included first and then again later to ensure that we're able to "light up" new functionality based off new includes
 #include <wil/resource.h>
 
+#include <wil/com.h>
+#include <wil/stl.h>
+
 // Headers to "light up" functionality in resource.h
 #include <memory>
 #include <roapi.h>
 #include <winstring.h>
 
-#include <wil/com.h>
 #include <wil/resource.h>
-#include <wil/stl.h>
 #include <wrl/implements.h>
 
 #include "common.h"
+
+TEST_CASE("ResourceTests::TestLastErrorContext", "[resource][last_error_context]")
+{
+    // Destructing the last_error_context restores the error.
+    {
+        SetLastError(42);
+        auto error42 = wil::last_error_context();
+        SetLastError(0);
+    }
+    REQUIRE(GetLastError() == 42);
+
+    // The context can be moved.
+    {
+        SetLastError(42);
+        auto error42 = wil::last_error_context();
+        SetLastError(0);
+        {
+            auto another_error42 = wil::last_error_context(std::move(error42));
+            SetLastError(1);
+        }
+        REQUIRE(GetLastError() == 42);
+        SetLastError(0);
+        // error42 has been moved-from and should not do anything at destruction.
+    }
+    REQUIRE(GetLastError() == 0);
+
+    // The context can be self-assigned, which has no effect.
+    {
+        SetLastError(42);
+        auto error42 = wil::last_error_context();
+        SetLastError(0);
+        error42 = std::move(error42);
+        SetLastError(1);
+    }
+    REQUIRE(GetLastError() == 42);
+
+    // The context can be dismissed, which cause it to do nothing at destruction.
+    {
+        SetLastError(42);
+        auto error42 = wil::last_error_context();
+        SetLastError(0);
+        error42.release();
+        SetLastError(1);
+    }
+    REQUIRE(GetLastError() == 1);
+}
 
 TEST_CASE("ResourceTests::TestScopeExit", "[resource][scope_exit]")
 {
@@ -310,13 +357,21 @@ TEST_CASE("ResourceTests::VerifyUniqueComCall", "[resource][unique_com_call]")
     REQUIRE(*call1.addressof() == nullptr);
 
     call1.reset(&fake1);
-
     fake2.closes = 0;
     fake2.refs = 1;
     *(&call1) = &fake2;
     REQUIRE(!fake1.has_ref());
     REQUIRE(fake1.called());
     REQUIRE(fake2.has_ref());
+
+    call1.reset(&fake1);
+    fake2.closes = 0;
+    fake2.refs = 1;
+    *call1.put() = &fake2;
+    REQUIRE(!fake1.has_ref());
+    REQUIRE(fake1.called());
+    REQUIRE(fake2.has_ref());
+
     call1.reset();
     REQUIRE(!fake2.has_ref());
     REQUIRE(fake2.called());
@@ -548,6 +603,16 @@ TEST_CASE("UniqueStringAndStringMakerTests::VerifyStringMakerProcessHeap", "[res
 }
 #endif
 
+TEST_CASE("UniqueStringAndStringMakerTests::VerifyStringMakerMidl", "[resource][string_maker]")
+{
+    VerifyMakeUniqueString<wil::unique_midl_string>();
+    TestStringMaker<wil::unique_midl_string>(
+        [](PCWSTR value, size_t /*valueLength*/, const wil::unique_midl_string& result)
+        {
+            REQUIRE(wcscmp(value, result.get()) == 0);
+        });
+}
+
 TEST_CASE("UniqueStringAndStringMakerTests::VerifyStringMakerHString", "[resource][string_maker]")
 {
     wil::unique_hstring value;
@@ -596,3 +661,75 @@ TEST_CASE("UniqueStringAndStringMakerTests::VerifyLegacySTringMakers", "[resourc
     c = wil::make_cotaskmem_string_failfast(L"value");
 }
 #endif
+
+_Use_decl_annotations_ void* __RPC_USER MIDL_user_allocate(size_t size)
+{
+    return ::HeapAlloc(GetProcessHeap(), 0, size);
+}
+
+_Use_decl_annotations_ void __RPC_USER MIDL_user_free(void* p)
+{
+    ::HeapFree(GetProcessHeap(), 0, p);
+}
+
+TEST_CASE("UniqueMidlStringTests", "[resource][rpc]")
+{
+    wil::unique_midl_ptr<int[]> intArray{ reinterpret_cast<int*>(::MIDL_user_allocate(sizeof(int) * 10)) };
+    intArray[2] = 1;
+
+    wil::unique_midl_ptr<int> intSingle{ reinterpret_cast<int*>(::MIDL_user_allocate(sizeof(int) * 1)) };
+}
+
+TEST_CASE("UniqueEnvironmentStrings", "[resource][win32]")
+{
+    wil::unique_environstrings_ptr env{ ::GetEnvironmentStringsW() };
+    const wchar_t* nextVar = env.get();
+    while (nextVar &&* nextVar)
+    {
+        // consume 'nextVar'
+        nextVar += wcslen(nextVar) + 1;
+    }
+
+    wil::unique_environansistrings_ptr envAnsi{ ::GetEnvironmentStringsA() };
+    const char* nextVarAnsi = envAnsi.get();
+    while (nextVarAnsi && *nextVarAnsi)
+    {
+        // consume 'nextVar'
+        nextVarAnsi += strlen(nextVarAnsi) + 1;
+    }
+}
+
+TEST_CASE("UniqueVariant", "[resource][com]")
+{
+    wil::unique_variant var;
+    var.vt = VT_BSTR;
+    var.bstrVal = ::SysAllocString(L"25");
+    REQUIRE(var.bstrVal != nullptr);
+
+    auto call = [](const VARIANT&) {};
+    call(var);
+
+    VARIANT weakVar = var;
+    (void)weakVar;
+
+    wil::unique_variant var2;
+    REQUIRE_SUCCEEDED(VariantChangeType(&var2, &var, 0, VT_UI4));
+    REQUIRE(var2.vt == VT_UI4);
+    REQUIRE(var2.uiVal == 25);
+}
+
+TEST_CASE("DefaultTemplateParamCompiles", "[resource]")
+{
+    wil::unique_process_heap_ptr<> a;
+    wil::unique_virtualalloc_ptr<> b;
+
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+    wil::unique_hlocal_ptr<> c;
+    wil::unique_hlocal_secure_ptr<> d;
+    wil::unique_hglobal_ptr<> e;
+    wil::unique_cotaskmem_secure_ptr<> f;
+#endif
+
+    wil::unique_midl_ptr<> g;
+    wil::unique_cotaskmem_ptr<> h;
+}

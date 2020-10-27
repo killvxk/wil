@@ -1,18 +1,18 @@
 
-#include <wil/common.h>
+#include <wil/result.h>
+#include <wil/resource.h>
+#include <wil/win32_helpers.h>
+#include <wil/filesystem.h>
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
+#include <wil/wrl.h>
+#endif
+#include <wil/com.h>
 
 #ifdef WIL_ENABLE_EXCEPTIONS
 #include <memory>
 #include <set>
 #include <unordered_set>
 #endif
-
-#include <wil/result.h>
-#include <wil/resource.h>
-#include <wil/win32_helpers.h>
-#include <wil/filesystem.h>
-#include <wil/wrl.h>
-#include <wil/com.h>
 
 // Do not include most headers until after the WIL headers to ensure that we're not inadvertently adding any unnecessary
 // dependencies to STL, WRL, or indirectly retrieved headers
@@ -114,7 +114,7 @@ void TestErrorCallbacks()
 
         wil::ThreadFailureCache cacheNested;
 
-        LOG_HR(E_FAIL); unsigned short errorLine = __LINE__;
+        LOG_HR(E_FAIL); unsigned long errorLine = __LINE__;
         LOG_HR(E_FAIL);
         LOG_HR(E_FAIL);
         REQUIRE(cache.GetFailure()->hr == E_FAIL);
@@ -989,6 +989,9 @@ TEST_CASE("WindowsInternalTests::UniqueHandle", "[resource][unique_any]")
 
         // address
         REQUIRE(*spMoveHandle.addressof() == handleValue);
+        REQUIRE(*spMoveHandle.put() == nullptr);
+        *spMoveHandle.put() = ::CreateEventEx(nullptr, nullptr, CREATE_EVENT_INITIAL_SET, 0);
+        REQUIRE(spMoveHandle);
         REQUIRE(*(&spMoveHandle) == nullptr);
         *(&spMoveHandle) = ::CreateEventEx(nullptr, nullptr, CREATE_EVENT_INITIAL_SET, 0);
         REQUIRE(spMoveHandle);
@@ -1014,9 +1017,13 @@ TEST_CASE("WindowsInternalTests::UniqueHandle", "[resource][unique_any]")
         wchar_t tempFileName[MAX_PATH];
         REQUIRE_SUCCEEDED(witest::GetTempFileName(tempFileName));
 
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
         CREATEFILE2_EXTENDED_PARAMETERS params = { sizeof(params) };
         params.dwFileAttributes = FILE_ATTRIBUTE_TEMPORARY;
         wil::unique_hfile spValidHandle(::CreateFile2(tempFileName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_DELETE, CREATE_ALWAYS, &params));
+#else
+        wil::unique_hfile spValidHandle(::CreateFileW(tempFileName, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr));
+#endif
 
         ::DeleteFileW(tempFileName);
         REQUIRE(spValidHandle.get() != INVALID_HANDLE_VALUE);
@@ -1071,9 +1078,13 @@ TEST_CASE("WindowsInternalTests::UniqueHandle", "[resource][unique_any]")
         wchar_t tempFileName2[MAX_PATH];
         REQUIRE_SUCCEEDED(witest::GetTempFileName(tempFileName2));
 
+#if (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
         CREATEFILE2_EXTENDED_PARAMETERS params2 = { sizeof(params2) };
         params2.dwFileAttributes = FILE_ATTRIBUTE_TEMPORARY;
         *(&spMoveHandle) = ::CreateFile2(tempFileName2, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_DELETE, CREATE_ALWAYS, &params2);
+#else
+        *(&spMoveHandle) = ::CreateFileW(tempFileName2, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_DELETE, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, nullptr);
+#endif
 
         ::DeleteFileW(tempFileName2);
         REQUIRE(spMoveHandle);
@@ -1229,6 +1240,17 @@ TEST_CASE("WindowsInternalTests::SharedHandle", "[resource][shared_any]")
     swap(wh1, wh2);
     REQUIRE(wh1.lock().get() == ptr1);
     REQUIRE(wh2.lock().get() == ptr2);
+
+    // put
+    sp1.reset(::CreateEventEx(nullptr, nullptr, CREATE_EVENT_INITIAL_SET, 0));
+    REQUIRE(sp1);
+    sp1.put();   // frees the pointer...
+    REQUIRE_FALSE(sp1);
+    sp2 = sp1;
+    REQUIRE_FALSE(sp2);
+    *sp1.put() = ::CreateEventEx(nullptr, nullptr, CREATE_EVENT_INITIAL_SET, 0);
+    REQUIRE(sp1);
+    REQUIRE_FALSE(sp2);
 
     // address
     sp1.reset(::CreateEventEx(nullptr, nullptr, CREATE_EVENT_INITIAL_SET, 0));
@@ -2113,6 +2135,12 @@ void AddressRaiiTests(lambda_t const &fnCreate)
     *(&var1) = fnCreate();
     REQUIRE(var1);
 
+    var1.put();
+    REQUIRE_FALSE(var1);                              // verify that 'put()' does an auto-release
+
+    *var1.put() = fnCreate();
+    REQUIRE(var1);
+
     REQUIRE(var1.addressof() != nullptr);
     REQUIRE(var1);                               // verify that 'addressof()' does not auto-release
 }
@@ -2476,7 +2504,8 @@ TEST_CASE("WindowsInternalTests::InitOnceNonTests")
     init = {};
 
     // A thrown exception leaves the object un-initialized
-    REQUIRE_THROWS_AS(winner = wil::init_once(init, [&] { called = true; throw wil::ResultException(E_FAIL); }), wil::ResultException);
+    static volatile bool always_true = true; // So that the compiler can't determine that we unconditionally throw below (warning C4702)
+    REQUIRE_THROWS_AS(winner = wil::init_once(init, [&] { called = true; THROW_HR_IF(E_FAIL, always_true); }), wil::ResultException);
     REQUIRE_FALSE(wil::init_once_initialized(init));
     REQUIRE(called);
     REQUIRE_FALSE(winner);
@@ -2732,7 +2761,7 @@ public:
     HRESULT RuntimeClassInitialize(UINT n) { m_number = n; return S_OK; };
     STDMETHOD_(void, DoStuff)() {}
 private:
-    UINT m_number;
+    UINT m_number{};
 };
 
 void GetUnknownArray(_Out_ size_t* count, _Outptr_result_buffer_(*count) IFakeObject*** objects)
@@ -2815,6 +2844,11 @@ TEST_CASE("WindowsInternalTests::TestUniqueArrayCases", "[resource]")
         values = wistd::move(values2);
         REQUIRE(!!values);
         REQUIRE(!values2);
+
+        values = nullptr;
+        REQUIRE(!values);
+        GetDWORDArray(values.size_address(), values.put());
+        REQUIRE(!!values);
 
         values = nullptr;
         REQUIRE(!values);
@@ -2901,12 +2935,13 @@ TEST_CASE("WindowsInternalTests::TestUniqueArrayCases", "[resource]")
         REQUIRE(!!values);
         REQUIRE(!values.empty());
 
+        REQUIRE(values2.put() == values2.addressof());
         REQUIRE(&values2 == values2.addressof());
     }
 }
 #endif
 
-#ifndef __cplusplus_winrt
+#if !defined(__cplusplus_winrt) && (_WIN32_WINNT >= _WIN32_WINNT_WIN8)
 TEST_CASE("WindowsInternalTests::VerifyMakeAgileCallback", "[wrl]")
 {
     using namespace ABI::Windows::Foundation;
@@ -3232,7 +3267,7 @@ TEST_CASE("WindowsInternalTests::ThreadPoolTimerTest", "[resource][unique_thread
     ThreadPoolTimerWorkHelper<wil::unique_threadpool_timer_nocancel, FILETIME>(SetThreadpoolTimer, true);
 }
 
-#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP) && (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
 static void __stdcall SlimEventTrollCallback(
     _Inout_ PTP_CALLBACK_INSTANCE /*instance*/,
     _Inout_opt_ void* context,
@@ -3304,7 +3339,7 @@ TEST_CASE("WindowsInternalTests::SlimEventTests", "[resource][slim_event]")
     }
 
 }
-#endif // WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP)
+#endif // WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP) && (_WIN32_WINNT >= _WIN32_WINNT_WIN7)
 
 struct ConditionVariableCSCallbackContext
 {
@@ -3323,7 +3358,7 @@ struct ConditionVariableSRWCallbackContext
 template <typename T>
 static void __stdcall ConditionVariableCallback(
     _Inout_ PTP_CALLBACK_INSTANCE /*Instance*/,
-    _Inout_opt_ void* Context)
+    _In_ void* Context)
 {
     auto callbackContext = reinterpret_cast<T*>(Context);
 
@@ -3429,7 +3464,7 @@ void VerifyAlignment()
     {
         char c;
         Wrapper<alignment_sensitive_struct> wrapper;
-    } possibly_misaligned;
+    } possibly_misaligned{};
 
     static_assert(alignof(attempted_misalignment) == alignof(alignment_sensitive_struct), "Wrapper type does not respect alignment");
 

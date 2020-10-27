@@ -1,11 +1,18 @@
 
-#include <time.h>
+#include <ctime> // TODO: https://github.com/microsoft/wil/issues/44
 #include <wil/winrt.h>
 
 #ifdef WIL_ENABLE_EXCEPTIONS
 #include <map>
 #include <string>
 #endif
+
+// Required for pinterface template specializations that we depend on in this test
+#include <Windows.ApplicationModel.Chat.h>
+#pragma push_macro("GetCurrentTime")
+#undef GetCurrentTime
+#include <Windows.UI.Xaml.Data.h>
+#pragma pop_macro("GetCurrentTime")
 
 #include "common.h"
 #include "FakeWinRTTypes.h"
@@ -487,13 +494,17 @@ void RunWhenCompleteCompilationTest()
     {
         ComPtr<IAsyncOperation<HSTRING>> stringOp;
         wil::run_when_complete(stringOp.Get(), [](HRESULT /* result */, HSTRING /* value */) {});
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
         auto result = wil::wait_for_completion(stringOp.Get());
+#endif
     }
 
     {
         ComPtr<IAsyncOperationWithProgress<HSTRING, UINT64>> stringOpWithProgress;
         wil::run_when_complete(stringOpWithProgress.Get(), [](HRESULT /* result */, HSTRING /* value */) {});
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
         auto result = wil::wait_for_completion(stringOpWithProgress.Get());
+#endif
     }
 }
 #endif
@@ -518,6 +529,7 @@ TEST_CASE("WinRTTests::RunWhenCompleteMoveOnlyTest", "[winrt][run_when_complete]
     REQUIRE(gotEvent);
 }
 
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
 TEST_CASE("WinRTTests::WaitForCompletionTimeout", "[winrt][wait_for_completion]")
 {
     auto op = Make<FakeAsyncOperation<bool, boolean>>();
@@ -606,6 +618,7 @@ void WaitForCompletionCompilationTest()
 #endif
 }
 #pragma warning(pop)
+#endif
 
 TEST_CASE("WinRTTests::TimeTTests", "[winrt][time_t]")
 {
@@ -793,6 +806,31 @@ TEST_CASE("WinRTTests::VectorRangeTest", "[winrt][vector_range]")
     {
         REQUIRE(index++ == itr->Get().X);
     }
+
+    // Iterator self-assignment is a nop.
+    {
+        auto inspRange2 = wil::get_range(inspectables.Get());
+        auto itr = inspRange2.begin();
+        REQUIRE(itr != inspRange2.end()); // should have something in it
+        auto& ref = *itr;
+        auto val = ref;
+        itr = itr;
+        REQUIRE(val == ref);
+        itr = std::move(itr);
+        REQUIRE(val == ref);
+    }
+
+    {
+        auto strRange2 = wil::get_range(strings.Get());
+        auto itr = strRange2.begin();
+        REQUIRE(itr != strRange2.end()); // should have something in it
+        auto& ref = *itr;
+        auto val = ref.Get();
+        itr = itr;
+        REQUIRE(val == ref);
+        itr = std::move(itr);
+        REQUIRE(val == ref.Get());
+    }
 #endif
 }
 
@@ -839,4 +877,18 @@ TEST_CASE("WinRTTests::VectorRangeLeakTest", "[winrt][vector_range]")
     inspectables = nullptr; // clear all refs to verifyNotLeaked
     REQUIRE(GetComObjectRefCount(verifyNotLeaked.Get()) == 1);
 #endif
+}
+
+TEST_CASE("WinRTTests::TwoPhaseConstructor", "[winrt][hstring]")
+{
+    const wchar_t left[] = L"left";
+    const wchar_t right[] = L"right";
+    ULONG needed = ARRAYSIZE(left) + ARRAYSIZE(right) - 1;
+    auto maker = wil::TwoPhaseHStringConstructor::Preallocate(needed);
+    REQUIRE_SUCCEEDED(StringCbCopyW(maker.Get(), maker.ByteSize(), left));
+    REQUIRE_SUCCEEDED(StringCbCatW(maker.Get(), maker.ByteSize(), right));
+    REQUIRE_SUCCEEDED(maker.Validate(needed * sizeof(wchar_t)));
+
+    wil::unique_hstring promoted{ maker.Promote() };
+    REQUIRE(wcscmp(L"leftright", str_raw_ptr(promoted)) == 0);
 }

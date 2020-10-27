@@ -16,6 +16,7 @@
 #include <libloaderapi.h> // GetProcAddress
 #include <Psapi.h> // GetModuleFileNameExW (macro), K32GetModuleFileNameExW
 #include <PathCch.h>
+#include <objbase.h>
 
 #include "result.h"
 #include "resource.h"
@@ -55,7 +56,7 @@ namespace wil
 
     namespace filetime
     {
-        inline unsigned long long to_int64(const FILETIME &ft)
+        constexpr unsigned long long to_int64(const FILETIME &ft)
         {
             // Cannot reinterpret_cast FILETIME* to unsigned long long*
             // due to alignment differences.
@@ -69,12 +70,12 @@ namespace wil
             return *reinterpret_cast<FILETIME *>(&i64);
         }
 
-        inline FILETIME add(_In_ FILETIME const &ft, long long delta)
+        inline FILETIME add(_In_ FILETIME const &ft, long long delta100ns)
         {
-            return from_int64(to_int64(ft) + delta);
+            return from_int64(to_int64(ft) + delta100ns);
         }
 
-        inline bool is_empty(const FILETIME &ft)
+        constexpr bool is_empty(const FILETIME &ft)
         {
             return (ft.dwHighDateTime == 0) && (ft.dwLowDateTime == 0);
         }
@@ -85,6 +86,51 @@ namespace wil
             GetSystemTimeAsFileTime(&ft);
             return ft;
         }
+
+        /// Convert time as units of 100 nanoseconds to milliseconds. Fractional milliseconds are truncated.
+        constexpr unsigned long long convert_100ns_to_msec(unsigned long long time100ns)
+        {
+            return time100ns / filetime_duration::one_millisecond;
+        }
+
+        /// Convert time as milliseconds to units of 100 nanoseconds.
+        constexpr unsigned long long convert_msec_to_100ns(unsigned long long timeMsec)
+        {
+            return timeMsec * filetime_duration::one_millisecond;
+        }
+
+#if defined(_APISETREALTIME_)
+        /// Returns the current unbiased interrupt-time count, in units of 100 nanoseconds. The unbiased interrupt-time count does not include time the system spends in sleep or hibernation.
+        ///
+        /// This API avoids prematurely shortcircuiting timing loops due to system sleep/hibernation.
+        ///
+        /// This is equivalent to GetTickCount64() except it returns units of 100 nanoseconds instead of milliseconds, and it doesn't include time the system spends in sleep or hibernation.
+        /// For example
+        ///
+        ///     start = GetTickCount64();
+        ///     hibernate();
+        ///     ...wake from hibernation 30 minutes later...;
+        ///     elapsed = GetTickCount64() - start;
+        ///     // elapsed = 30min
+        ///
+        /// Do the same using unbiased interrupt-time and elapsed is 0 (or nearly so).
+        ///
+        /// @note This is identical to QueryUnbiasedInterruptTime() but returns the value as a return value (rather than an out parameter).
+        /// @see https://msdn.microsoft.com/en-us/library/windows/desktop/ee662307(v=vs.85).aspx
+        inline unsigned long long QueryUnbiasedInterruptTimeAs100ns()
+        {
+            ULONGLONG now{};
+            QueryUnbiasedInterruptTime(&now);
+            return now;
+        }
+
+        /// Returns the current unbiased interrupt-time count, in units of milliseconds. The unbiased interrupt-time count does not include time the system spends in sleep or hibernation.
+        /// @see QueryUnbiasedInterruptTimeAs100ns
+        inline unsigned long long QueryUnbiasedInterruptTimeAsMSec()
+        {
+            return convert_100ns_to_msec(QueryUnbiasedInterruptTimeAs100ns());
+        }
+#endif // _APISETREALTIME_
     }
 #pragma endregion
 
@@ -111,14 +157,24 @@ namespace wil
         else
         {
             // Did not fit in the stack allocated buffer, need to do 2 phase construction.
-            // valueLengthNeededWithNull includes the null so subtract that as make() will add space for it.
-            RETURN_IF_FAILED(maker.make(nullptr, valueLengthNeededWithNull - 1));
+            // May need to loop more than once if external conditions cause the value to change.
+            size_t bufferLength;
+            do
+            {
+                bufferLength = valueLengthNeededWithNull;
+                // bufferLength includes the null so subtract that as make() will add space for it.
+                RETURN_IF_FAILED(maker.make(nullptr, bufferLength - 1));
 
-            size_t secondLength{};
-            RETURN_IF_FAILED(callback(maker.buffer(), valueLengthNeededWithNull, &secondLength));
+                RETURN_IF_FAILED_EXPECTED(callback(maker.buffer(), bufferLength, &valueLengthNeededWithNull));
+                WI_ASSERT(valueLengthNeededWithNull > 0);
 
-            // Ensure callback produces consistent result.
-            FAIL_FAST_IF(valueLengthNeededWithNull != secondLength);
+                // If the value shrunk, then adjust the string to trim off the excess buffer.
+                if (valueLengthNeededWithNull < bufferLength)
+                {
+                    RETURN_IF_FAILED(maker.trim_at_existing_null(valueLengthNeededWithNull - 1));
+                }
+            }
+            while (valueLengthNeededWithNull > bufferLength);
         }
         result = maker.release();
         return S_OK;
@@ -137,6 +193,7 @@ namespace wil
         });
     }
 
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM | WINAPI_PARTITION_GAMES)
     /** Searches for a specified file in a specified path using ExpandEnvironmentStringsW(); */
     template <typename string_type, size_t stackBufferLength = 256>
     HRESULT SearchPathW(_In_opt_ PCWSTR path, _In_ PCWSTR fileName, _In_opt_ PCWSTR extension, string_type& result) WI_NOEXCEPT
@@ -197,10 +254,9 @@ namespace wil
 
         return S_OK;
     }
+#endif
 
-    /** Looks up the environment variable 'key' and fails if it is not found.
-    'key' should not have '%' prefix and suffix.
-    Dangerous since environment variable generally are optional. */
+    /** Looks up the environment variable 'key' and fails if it is not found. */
     template <typename string_type>
     inline HRESULT GetEnvironmentVariableW(_In_ PCWSTR key, string_type& result) WI_NOEXCEPT
     {
@@ -229,8 +285,7 @@ namespace wil
         });
     }
 
-    /** Looks up the environment variable 'key' and returns null if it is not found.
-    'key' should not have '%' prefix and suffix. */
+    /** Looks up the environment variable 'key' and returns null if it is not found. */
     template <typename string_type>
     HRESULT TryGetEnvironmentVariableW(_In_ PCWSTR key, string_type& result) WI_NOEXCEPT
     {
@@ -342,6 +397,7 @@ namespace wil
         return result;
     }
 
+#if WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM | WINAPI_PARTITION_GAMES)
     /** Searches for a specified file in a specified path using SearchPathW*/
     template <typename string_type = wil::unique_cotaskmem_string, size_t stackBufferLength = 256>
     string_type TrySearchPathW(_In_opt_ PCWSTR path, _In_ PCWSTR fileName, PCWSTR _In_opt_ extension)
@@ -351,10 +407,9 @@ namespace wil
         THROW_HR_IF(searchHR, FAILED(searchHR) && (searchHR != HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)));
         return result;
     }
+#endif
 
-    /** Looks up the environment variable 'key' and fails if it is not found.
-    'key' should not have '%' prefix and suffix.
-    Dangerous since environment variable generally are optional. */
+    /** Looks up the environment variable 'key' and fails if it is not found. */
     template <typename string_type = wil::unique_cotaskmem_string>
     string_type GetEnvironmentVariableW(_In_ PCWSTR key)
     {
@@ -363,8 +418,7 @@ namespace wil
         return result;
     }
 
-    /** Looks up the environment variable 'key' and returns null if it is not found.
-    'key' should not have '%' prefix and suffix. */
+    /** Looks up the environment variable 'key' and returns null if it is not found. */
     template <typename string_type = wil::unique_cotaskmem_string>
     string_type TryGetEnvironmentVariableW(_In_ PCWSTR key)
     {
